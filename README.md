@@ -1,4 +1,4 @@
-Coursera-Johns-Hopkins-University-Data-Science-Specialisation-Next-Word-Prediction 
+Coursera Johns Hopkins University Data Science Specialisation Capstone Project: "Next Word Prediction" 
 
 The project is to build the model to predict the next word of a word or a word sequence.
 
