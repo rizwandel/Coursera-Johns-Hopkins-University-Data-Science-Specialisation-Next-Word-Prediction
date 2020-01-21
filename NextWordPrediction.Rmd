@@ -1,0 +1,877 @@
+---
+title: "Capstone Project Coursera JHU Data Science"
+author: "Mohamed Rizwan"
+date: "21/01/2020"
+output: 
+  html_document: 
+    df_print: tibble
+editor_options: 
+  chunk_output_type: console
+---
+
+**"Next Word Prediction" using trigrams with katz-backoff interpolation**
+
+## Introduction:
+
+The project is to build the model to predict the next word of a word or a word sequence. 
+
+* The model was based on the English versions of blogs, news, and twitters in the Coursera-Swiftkey dataset. The raw data preprocessed to remove profanities, numbers, punctuations,etc. 
+* From the clean data, three sets of unigrams, bigrams, and trigrams were generated and explored. 
+* The counts of these n-grams indicated the prevalence of English stopwords when they were included 
+* The model is created with the linear interpolation of unigram, bigram, and trigram probabilities to estimate the probability of the next word’s trigram. 
+* The optimal weights of these probabilities resulted from a search using the simplex method to maximize the accuracy of the first next word predicted. 
+* The model with stopwords predicted the first next word with about 9% accuracy.
+
+## Loaded en_US files from the directory (downloaded from Coursera-SwiftKey link)
+```{r load data, echo=TRUE, message=FALSE, warning=FALSE}
+print(paste("Date of publishing the project:",date(),"&","Location:","India/New Delhi"))
+library(dplyr,warn.conflicts=FALSE);library(rmarkdown)
+##Reading the text data from en_US files from the directory
+con_tweets <- file("/Users/rizwanmohamed/Coursera/textData/final/en_US/en_US.twitter.txt","r")
+con_news<-file("/Users/rizwanmohamed/Coursera/textData/final/en_US/en_US.news.txt","r")
+con_blogs<-file("/Users/rizwanmohamed/Coursera/textData/final/en_US/en_US.blogs.txt","r")
+tweetdata<- readLines(con_tweets,encoding= "UTF-8",skipNul = TRUE,warn = FALSE);close(con_tweets)
+newsdata <- readLines(con_news,encoding= "UTF-8",skipNul = TRUE, warn = FALSE);close(con_news)
+blogdata <- readLines(con_blogs,encoding= "UTF-8",skipNul = TRUE,warn = FALSE);close(con_blogs)
+## Profanity: bad-words.csv data downloaded from "https://www.kaggle.com/nicapotato/bad-bad-words/data"
+con<- file("/Users/rizwanmohamed/Coursera/bad-words.csv","r")
+profanityWords1 <- readLines(con);close(con = con)
+saveRDS(profanityWords1,"profanityWords1.rds")
+```
+
+## 16% of data drawn from each of the files to create the sample
+```{r sample, echo=TRUE, warning=FALSE}
+##Set seed
+set.seed(16012020)
+blog_idx <- rbinom(length(blogdata),100000,0.5)
+news_idx <- rbinom(length(newsdata),100000,0.5)
+tweet_idx <- rbinom(length(tweetdata),100000,0.5)
+##Selected 10% data from each of the three text files to create sample using binomial distribution
+blogs <- sample(blogdata[blog_idx],size=(0.16*length(blogdata)),replace=FALSE)
+news <- sample(newsdata[news_idx],size=(0.16*length(blogdata)),replace = FALSE)
+tweets <- sample(tweetdata[tweet_idx],size=(0.16*length(blogdata)),replace = FALSE)
+sampleData <- c(blogs,news,tweets)
+##Permutate the sample
+sampleData <- sample(sampleData, size=length(sampleData), replace=FALSE)
+##Total number of lines
+length(sampleData)
+saveRDS(sampleData,"sampleData.rds")
+```
+
+## Training, Development and Testing Sets created in the proportion of 80%,10% and 10% of the sample
+```{r data partition, echo=TRUE}
+library(lattice);library(ggplot2);library(caret);library(dplyr,warn.conflicts = FALSE)
+##Partitioning the sample
+trainPercent <- 0.80
+devPercent <- 0.10
+testPercent <- 0.10
+testSplit <- testPercent
+trainSplit <- trainPercent/(trainPercent + devPercent)
+##Split the sample into training and non-train data sets
+inTest <- createDataPartition(seq_len(NROW(sampleData)), p=testSplit, list=FALSE)
+TestData <- sampleData[inTest]
+NonTestData <- sampleData[-inTest]
+##Split the non-train data into test and development data sets
+inTrain<- createDataPartition(seq_len(NROW(NonTestData)), p=trainSplit,list=FALSE)
+TrainData <- NonTestData[inTrain]
+DevData <- NonTestData[-inTrain]
+rm(sampleData,testSplit,trainSplit,con,con_blogs,con_news,con_tweets)
+```
+
+## Data summary details of Training, Development and Test sets
+```{r summary table, echo=TRUE, message=FALSE, warning=FALSE}
+library(stringi);library(stringr)
+## Lines in data sets
+ltr <- length(TrainData)
+ldv <- length(DevData)
+ltt <- length(TestData)
+lss <- ltr+ldv+ltt
+## Words in data sets
+wtr<- sum(stri_count_words(TrainData))
+wdv <- sum(stri_count_words(DevData))
+wtt <- sum(stri_count_words(TestData))
+wss<- wtr+wdv+wtt
+##Data details
+summaryTable<- data.frame(File = c("Train Data","Development Data","Test Data","Sample Data"),Total.Lines = c(ltr,ldv,ltt,lss),percent_of_total =round(c((100*ltr/lss),(100*ldv/lss),(100*ltt/lss),100)),Total.Words = c(wtr,wdv,wtt,wss),Words.per.Line=round(c((wtr/ltr),(wdv/ldv),(wtt/ltt),(wss/lss))))
+print(summaryTable)
+##remove auxiliary data
+rm(blogdata,tweetdata,newsdata,blogs,news,tweets,blog_idx,tweet_idx,news_idx,profanityWords1,NonTestData,testPercent,trainPercent,devPercent,ldv,ltr,ltt,lss,wdv,wtt,wtr,wss,inTest,inTrain)
+```
+
+## Corpus of words - Removed profanity and not removed stopwords 
+```{r corpus, echo=TRUE, message=FALSE, warning=FALSE}
+library(NLP);library(ngram);library(textclean);library(tm);library(data.table)
+##getCorpus function cleans text data to output the clean corpus
+##note: retained stopwords to improve the accuracy of models
+options(mc.cores=1)#avoid hanging of Ngram tokenizer
+getCorpus<- function(textdata){
+    if (!require(tm)) {
+        stop("Library tm is missing.")
+    }
+    if (!require(ngram)) {
+        stop("Library ngram is missing.")
+        }
+    exp1 <- content_transformer(function(x,pattern) gsub(pattern,replacement =" ",x))
+    exp2 <-content_transformer(function(x,pattern) gsub(pattern,replacement ="",x))
+    corp<- VCorpus(VectorSource(textdata),list(readPlain,language="en"))
+    corp<-tm_map(corp,content_transformer(tolower))
+    corp <- tm_map(corp,exp1,"[[:alnum:]]+\\@[[:alpha:]]+\\.com")
+    corp<- tm_map(corp,exp1,"[^a-z\\s]+")
+    corp <- tm_map(corp,exp1,"\\(.*?\\)")
+    corp<- tm_map(corp,removeWords,readRDS("profanityWords1.rds"))
+    corp<-tm_map(corp,exp1,"[[:punct:]]+")
+    corp<-tm_map(corp,exp2,"[\\']+")
+    corp <- tm_map(corp,exp1,"(^[[:space:]]+|[[:space:]]+$)")
+    corp<- tm_map(corp,exp1,"rt")
+    corp<-tm_map(corp,stripWhitespace)
+    corp<-tm_map(corp,removeNumbers)
+    corp<-tm_map(corp,PlainTextDocument)
+    return(corp)
+}
+## NOTE: As I already saved the files in the directory, not running the code as it takes about an hour. Hoewever, the code is included for the reference.
+```
+
+
+set.seed(16012020)
+
+Training corpus
+
+trainCorpus <- getCorpus(TrainData)
+
+saveRDS(trainCorpus,"trainCorpus.rds")
+
+Development corpus
+
+devCorpus <- getCorpus(DevData)
+
+saveRDS(devCorpus,"devCorpus.rds")
+
+Test corpus
+
+testCorpus <- getCorpus(TestData)
+
+saveRDS(testCorpus,"testCorpus.rds")
+
+Save the files 
+
+save(TrainData,DevData,TestData, file="textData.rda")
+
+```{r}
+library(knitr)
+knitr::include_graphics(path="/Users/rizwanmohamed/Coursera/ngramfig.png")
+```
+
+## Get dataframes of ngrams, counts, probabilitites of the training, test and development data
+```{r Ngrams Dataframes, echo=TRUE, warning=FALSE}
+library(dplyr);library(tm);library(ngram);library(textclean);library(NLP)
+##Set seed
+set.seed(16012020)
+##getNgrams function takes the corpus & n(= 1,2,3,4) as **INPUT** and returns the dataframe of Ngrams with col(ngrams, freq, prop) as **OUTPUT**.
+
+getNgrams <- function(corpus, n=1) {
+    if (!require(ngram)) {
+        stop("Library ngram is missing.")
+    }
+    ## Convert corpus to a string
+    str <-concatenate(as.character(unlist(corpus)))
+    str<-replace_contraction(str)
+    str <- stri_replace_all(str, replacement = "'", fixed = "’")
+    str<- removeNumbers(str)
+    str <- gsub("(^[[:space:]]+|[[:space:]]+$)", "", str)
+    str<-str[!((str == "")|(str=="'"))]
+    str<- removePunctuation(str,reserve_intra_word_dashes=TRUE)
+    str<- gsub(" [b-hj-z] ", " ", str)
+    str<- stripWhitespace(str)
+    ngramDF <- ngram(str, n=n)
+    return(get.phrasetable(ngramDF))
+}
+trainCorpus<- readRDS("trainCorpus.rds")
+devCorpus<- readRDS("devCorpus.rds")
+testCorpus<- readRDS("testCorpus.rds")
+t1<-proc.time()
+## Ngrams of training corpus: data frame of (ngrams, freq, prop)
+train1grams <- getNgrams(trainCorpus,1)
+head(train1grams,1)
+train2grams <- getNgrams(trainCorpus,2)
+head(train2grams,1)
+train3grams <- getNgrams(trainCorpus,3)
+head(train3grams,1)
+save(train1grams,train2grams, train3grams,file="trainNGrams.rda")
+## Ngrams of development corpus
+dev1grams <- getNgrams(devCorpus,1)
+dev2grams <- getNgrams(devCorpus,2)
+dev3grams <- getNgrams(devCorpus,3)
+save(dev1grams,dev2grams,dev3grams,file="devNGrams.rda")
+## Ngrams of test corpus
+test1grams <- getNgrams(testCorpus,1)
+test2grams <- getNgrams(testCorpus,2)
+test3grams <- getNgrams(testCorpus,3)
+save(test1grams, test2grams, test3grams,file="testNGrams.rda")
+## remove auxiliary data
+save(train1grams,train2grams,train3grams,dev1grams,dev2grams,dev3grams,test1grams,test2grams,test3grams,file="Ngrams.rda")
+t2<-proc.time()
+print(t2-t1)
+```
+
+# Good Turing Method: Calculating the smoothed probabilites and counts of Ngrams
+```{r Good Turing Method, echo=TRUE, message=FALSE, warning=FALSE}
+## We'll use (1) Turing estimate = r(T), for small r and use (2) Linear Good-Turing estimate = r(LGT), for large r
+## We'll switch to LGT when r(T) - r(LGT) > 1.65*sd, once switched to LGT, keep using LGT.
+##
+## simpleGT function takes **freqTable, a datatable of r (freq rate of Ngram)** and **Nr (freq of frequencies of Ngram)** as an INPUT to return the smoothed frequencies (rrstar) as OUTPUT.
+## rrstar is a data table of r (freq) and rstar (freqGT) where freq = original frequencies and freqGT is frequencies of frequencies(Nr) smoothed by Good Turing method.
+## The first row in the data table is the pair of freq=0 (frequency of unseen Ngrams) and freqGT at freq=0 (smoothed by the simple GT): (0,freqGT_at_0)
+
+##**simpleGT function** to calculate smoothed probabilities and counts:
+simpleGT <- function(freqTable) {
+    ## nrz.est: Averaging transformation
+    ## Replace nr by zr = nr/(0.5*(t - q))
+    ## where q, r, t are successive indices of non-zero values
+    nrz.est <- function(r, nr) {
+        d <- c(1, diff(r))
+        dr <- c(0.5 * (d[-1] + d[-length(d)]), d[length(d)])# sum(average of 1st& last element of d removed)+last element
+        return(nr/dr)
+    }
+    ## rstest: Linear Good-Turing estimate for large r
+    ## log(nr) = a + b * log(r)
+    ## b = coef[2], intersect
+    ## rstest r(star)est = r *(1 + 1/r)^(b + 1)
+    ## b < -1, in gtfuncs.S by William A. Gale
+    rstest <- function(r, coef) {
+        return(r * (1 + 1/r)^(1 + coef[2]))
+    }
+    ## The following code comes from gtanal.S by William A. Gale
+    ## Get the input xr and xnr    
+    xm <- freqTable
+    xr <- xm[, 1]
+    xnr <- xm[, 2]
+    xN <- sum(xr * xnr)
+    ## make averaging transform
+    xnrz <- nrz.est(xr, xnr)
+    ##(2) Linear Good-Turing estimate - took logs xr,xnr instead of xr and xnr
+    xf <- lsfit(log(xr), log(xnrz))# least squares fit (y=a+bX)
+    xcoef <- xf$coef
+    xrst <- rstest(xr, xcoef)
+    xrst_rel <- xrst/xr
+    ##(1) Turing estimate
+    xrtry <- xr == c(xr[-1]-1, 0)
+    xrsta_rel <- rep(0, length(xr))
+    xrsta_rel[xrtry] <- (xr[xrtry]+1) / xr[xrtry] * c(xnr[-1], 0)[xrtry] / xnr[xrtry]
+    ## make switch from Turing to LGT estimates
+    tursd <- rep(1, length(xr))
+    for (i in 1:length(xr)) {
+        tursd[i] <- (i+1) / xnr[i] * sqrt(xnr[i=1] * (1 + xnr[i+1] / xnr[i]))
+    }
+    xrstcmbrel <- rep(0, length(xr))
+    useturing <- TRUE
+    for (r in 1:length(xr)) {
+        if (!useturing) {
+            xrstcmbrel[r] <- xrst_rel[r]
+        } else if (abs(xrst_rel - xrsta_rel)[r] * r / tursd[r] > 1.65) {
+            xrstcmbrel[r] <- xrsta_rel[r]
+        } else {
+            useturing <- FALSE
+            xrstcmbrel[r] <- xrst_rel[r]
+        }
+    }
+    ## renormalize the probabilities for observed objects
+    sumpraw <- sum(xrstcmbrel * xr * xnr / xN)
+    xrstcmbrel <- xrstcmbrel * (1 - xnr[1]/xN) / sumpraw
+    ## output matrix (0, r0est) + (xr, xnrstarnormalized)
+    rrstar <- cbind(c(0, xr), c(xnr[1]/xN, xr*xrstcmbrel))
+    ## output data table by pairs = (r = freq, rstar = freqGT)
+    ## keyed (ordered) by freq
+    rrstar <- data.table(rrstar)
+    colnames(rrstar) <- c("freq", "freqGT")
+    setkey(rrstar, freq)
+    return(rrstar)
+}
+```
+
+## Smoothing the Ngrams with Good-Turing algorithm to get the Ngrams dataframe with smoothed frequencies and prob at zero freq(Pzero). 
+```{r ProbGT & Pzero, echo=TRUE, message=FALSE, warning=FALSE}
+## INPUT = ngramDF**, is a Ngrams dataframe obtained from the getNgrams() & minimum frequency of Ngrams
+## OUTPUT = list of a smoothed ngrams dataframe (ngramDT) & the probability of zero frequency (Pzero)
+smoothedNgrams <- function(ngramDF, minFreq=2) {
+    if (!require(stringr)) {
+        stop("Library stringr is missing.")
+    }
+    ## Convert the data frame to datatable and rename columns
+    colnames(ngramDF) <- c("ngram", "freq", "prob")
+    ngramDT <- data.table(ngramDF)
+    ## Remove ngrams with frequencies below the cutoff minFreq
+    ngramDT <- ngramDT[freq >= minFreq]
+    ## Get frequency (Nr) of frequency r,
+    freqNf <- data.table(table(ngramDT[, "freq"]))
+    colnames(freqNf) <- c("freq", "NFreq")
+    freqNf <- sapply(freqNf, as.numeric)
+    ## Get frequencies smoothed by Simple Good Turing method
+    freqGT <- simpleGT(freqNf)
+    ## Merge ngramDT with freqGT 
+    setkey(ngramDT,freq)
+    ngramDT <- merge(ngramDT, freqGT)
+    ## Calculate probability of zero frequency
+    pZero <- freqGT[1, 2]/sum(c(1, freqNf[, "NFreq"]) * freqGT[, 2])
+    ## Output = list of smoothed ngrams dataframe and probability of zero frequency
+    ngramDT_Pzero <- list(ngramDT=ngramDT, pZero=pZero)
+    return(ngramDT_Pzero)
+}
+```
+
+# Functions to calculate the adjusted counts and probabilities of Ngrams
+```{r Calculate adjusted Counts & Probs, echo=TRUE, message=FALSE, warning=FALSE}
+##**Unigram**
+## recal_1gram trims single words and calculates adjusted counts (frequencies) and probabilities: p(w1) = count(w1)/count(all w1)
+## INPUT = ugramDT, a data table of smoothed unigrams, c(ngram, freq, prob, freqGT) from the list obtained from 
+## smoothedNgrams(),where freq = original freq, freqGT = freq smoothed by simple GT method.
+## OUTPUT= ugramDT, a data table of (unigram, word1, freq, prob, freqGT, probGT), 
+## where probGT = probability calculated from freqGT
+recal_1gram <- function(ugramDT) {
+    if (!require(stringr)) {
+        stop("Library stringr is missing.")
+    }
+    ## Trim trailing spaces
+    ugramDT <-ugramDT$ngramDT
+    ugramDT <-ugramDT[, word1 := str_trim(ngram)]
+    setkey(ugramDT, word1)
+    ## Reset unsmoothed frequencies and calculate words' probabilities
+    ugramDT <- ugramDT[, freq := sum(freq), by=c("word1")]
+    ugramTotalFreq <- sum(ugramDT$freq)
+    ugramDT[, prob := freq/ugramTotalFreq]
+    ## Reset smoothed frequencies and calculate words' probabilities
+    ugramDT <- ugramDT[, freqGT := sum(freqGT), by=c("word1")]
+    ugramTotalFreqGT <- sum(ugramDT$freqGT)
+    ugramDT[, probGT := freqGT/ugramTotalFreqGT]
+    ## Set key column
+    setkey(ugramDT, word1)
+    ## Reorder the columns in unigrams
+    setcolorder(ugramDT, c("ngram", "word1","freq", "prob", "freqGT", "probGT"))
+    return(ugramDT)
+}
+##**Bigrams**
+## recal_2grams function splits the 2-grams of Bigram dataframe into two words, sets words not in the vocabulary to <UNK>,
+## calculates adjusted counts (frequencies) and probabilities, $p(w2|w1) = count(w1,w2)/count(w1)$
+## INPUT = bigramDt, a datatable of bigrams, c(ngram, freq, prob, freqGT) obtained from smoothedNgrams() & Vocab, a list of single words as vocabulary
+## OUTPUT = bigramDt, a datatable with col(bigram, word1, word2, freq, prob, freqGT, probGT),
+## where freq = original freq, freqGT = freq smoothed by simple GT method.
+recal_2grams<- function(bigramDt, vocab) {
+    if (!require(stringr)) {
+        stop("Library stringr is missing.")
+    }
+    ## Split the bigram into words
+    bigramSplits <- str_split(bigramDt$ngram, boundary("word"))
+    bigramDt[, word1 := sapply(bigramSplits, function(x) x[1])]
+    bigramDt[, word2 := sapply(bigramSplits, function(x) x[2])]
+    ## Set words not in the vocabulary list to <UNK>
+    bigramDt[!(word1 %in% vocab), word1 := "<UNK>"]
+    bigramDt[!(word2 %in% vocab), word2 := "<UNK>"]
+    ## Count instances of word1 word2 and word1 by freq (unsmoothed)
+    bigramDt[, count_w1_w2 := sum(freq), by=c("word1", "word2")]
+    bigramDt[, count_w1 := sum(freq), by=c("word1")]
+    ## Calculate p(w2|w1) = count(w1,w2)/count(w1)
+    bigramDt[, prob := count_w1_w2/count_w1]
+    ## Count instances of word1 word2 and word1 by freqGT (smoothed)
+    bigramDt[, count_w1_w2_GT := sum(freqGT), by=c("word1", "word2")]
+    bigramDt[, count_w1_GT := sum(freqGT), by=c("word1")]
+    ## Calculate p(w2|w1) = count(w1,w2)/count(w1) by freqGT
+    bigramDt[, probGT := count_w1_w2_GT/count_w1_GT]
+    ## Remove temporary columns
+    bigramDt[, c("count_w1_w2", "count_w1", "count_w1_w2_GT", "count_w1_GT") := NULL]
+    ## Set key columns
+    setkey(bigramDt, word1, word2)
+    ## Reorder the columns in bigrams
+    setcolorder(bigramDt, c("ngram", "word1", "word2","freq", "prob", "freqGT", "probGT"))
+    return(bigramDt)
+}
+##**Trigrams**
+## recal_3grams function:
+## splits the 3-grams into three words (w1,w2,w3), sets words not in the vocabulary to <UNK>, recalculates frequencies and probability:
+## p(w3|w1w2) = count(w1,w2,w3)/count(w1,w2)
+## INPUT = trigramDt, a datatable of triigrams, c(ngram, freq, prob, freqGT) obtained from smoothedNgrams() & Vocab, a list of single words as vocabulary
+## OUTPUT = trigramDt, a datatable with col(trigrams,word1,word2,word3,freq, prob, freqGT, probGT),where freq = original freq, freqGT = freq smoothed by simple GT method.
+recal_3grams <- function(trigramDt, vocab) {
+    if (!require(stringr)) {
+        stop("Library stringr is missing.")
+    }
+    ## Split the bigram into words
+    trigramSplits <- str_split(trigramDt$ngram, boundary("word"))
+    trigramDt[, word1 := sapply(trigramSplits, function(m) m[1])]
+    trigramDt[, word2 := sapply(trigramSplits, function(m) m[2])]
+    trigramDt[, word3 := sapply(trigramSplits, function(m) m[3])]
+    ## Set words not in the vocabulary list to <UNK>
+    trigramDt[!(word1 %in% vocab), word1 := "<UNK>"]
+    trigramDt[!(word2 %in% vocab), word2 := "<UNK>"]
+    trigramDt[!(word3 %in% vocab), word3 := "<UNK>"]
+    ## Count instances of word1 word2 word3 and word1 word2 by freq (unsmoothed)
+    trigramDt[, count_w1_w2_w3 := sum(freq), by=c("word1", "word2", "word3")]
+    trigramDt[, count_w1_w2 := sum(freq), by=c("word1", "word2")]
+    ## Calculate p(w3|w1w2) = count(w1,w2,w3)/count(w1,w2)
+    trigramDt[, prob := count_w1_w2_w3/count_w1_w2]
+    ## Count instances of word1 word2 word3 and word1 word2 by freqGT (smoothed)
+    trigramDt[, count_w1_w2_w3_GT := sum(freqGT), by=c("word1", "word2", "word3")]
+    trigramDt[, count_w1_w2_GT := sum(freqGT), by=c("word1", "word2")]
+    ## Calculate p(w3|w1w2) = count(w1,w2,w3)/count(w1,w2) by freqGT
+    trigramDt[, probGT := count_w1_w2_w3_GT/count_w1_w2_GT]
+    ## Remove temporary columns
+    trigramDt[, c("count_w1_w2_w3", "count_w1_w2","count_w1_w2_w3_GT", "count_w1_w2_GT") := NULL]
+    setkey(trigramDt, word1, word2, word3)
+    ## Reorder the columns in trigrams
+    setcolorder(trigramDt, c("ngram", "word1", "word2", "word3", "freq", "prob", "freqGT", "probGT"))
+    return(trigramDt)
+}
+```
+
+# Final Unigrams, Bigrams and Trigrams with adjusted counts and probabilities after smoothing
+```{r adjusted counts & Probs after smoothing with GT method, echo=TRUE}
+#  Unigrams function converts a 1-gram dataframe into a data table, removes words with frequencies less than the minFreq, 
+## smoothes the frequencies by the Simple Good-Turing method,and recalculates frequencies and probabilities.
+## INPUTS = ugramDF, a 1-gram dataframe obtained from the getNgrams() & a minimum frequency 
+## OUTPUT = ugramDT_Pzero, a data table of 1-grams, with cols(ngram, word1, freq, prob, freqGT, probGT) &
+## pZero, smoothed frequency of an unobserved unigram.
+Unigrams<- function(ugramDF, minFreq) {
+    ugramDT_Pzero <- smoothedNgrams(ugramDF, minFreq)
+    ugramDT_Pzero$ngramDT<- recal_1gram(ugramDT_Pzero)
+    return(ugramDT_Pzero)
+}
+##
+#  Bigrams function converts a 2-gramS dataframe into a datatable, removes words with frequencies less than the minFreq, 
+## smoothes the frequencies by the Simple Good-Turing method,and recalculates frequencies and probabilities.
+## INPUT = bigramDF, a 2-gram dataframe obtained from the getNgrams() & a minimum frequency 
+## OUTPUT = ugramDT_Pzero, a datatable of 2-grams with cols(ngram, word1,word2,freq, prob, freqGT, probGT) &
+## pZero, smoothed frequency of an unobserved bigrams.
+Bigrams<- function(bigramDF, minFreq,vocab) {
+    BigramDT_Pzero <- smoothedNgrams(bigramDF, minFreq)
+    BigramDT_Pzero$ngramDT<- recal_2grams(BigramDT_Pzero$ngramDT,vocab)
+    return(BigramDT_Pzero)
+}
+##
+#  Trigrams function converts a 3-gramS dataframe into a datatable, removes words with frequencies less than the minFreq, 
+## smoothes the frequencies by the Simple Good-Turing method,and recalculates frequencies and probabilities.
+## INPUT = trigramDF, a 3-gram dataframe obtained from the getNgrams() & a minimum frequency 
+## OUTPUT = trigramDT_Pzero, a datatable of 3-grams with cols(ngram,word1,word2,word3,freq, prob, freqGT, probGT) &
+## pZero, smoothed frequency of an unobserved trigrams.
+Trigrams<- function(trigramDF, minFreq,vocab) {
+    TrigramDT_Pzero <- smoothedNgrams(trigramDF, minFreq)
+    TrigramDT_Pzero$ngramDT<- recal_3grams(TrigramDT_Pzero$ngramDT,vocab)
+    return(TrigramDT_Pzero)
+}
+```
+
+## Extracting all possible last words given a word or first two words of ngram
+```{r Train the model, echo=TRUE}
+#**bigram_lastWords:**
+## extracts all the bigrams containing the input first word (newWord1) along with the frequecies and probabilities
+## INPUT = bgramDt, a datatable of recalculted bigrams obtained from Bigrams() &
+## newWord1: the first word of bigram
+## OUTPUT = bNextWords, a datatable of all bigrams containing the newWord1 along with the frequecies and probabilities.
+bigram_lastWords <- function(bigramDt, newWord1) {
+    bNextWords <- subset(bigramDt, word1==newWord1)
+    bNextWords <- bNextWords[word2 != "<UNK>", ]
+    return(bNextWords)
+}
+##
+#**2.trigram_lastWords:**
+## extracts all the trigrams containing the input first two words (newWord1,newWord2) along with the frequecies and probabilities
+## INPUT = trigramDt, a datatable of recalculted trigrams obtained from Trigrams(),
+## newWord1: the first word of trigram &
+## newWord2: the second word of trigram
+## OUTPUT = tNextWords, a datatable of all trigrams containing the newWord1 along with the frequecies and probabilities.
+trigram_lastWords <- function(trigramDt, newWord1, newWord2) {
+    tNextWords <- subset(trigramDt, word1==newWord1 & word2==newWord2)
+    tNextWords <- tNextWords[word3 != "<UNK>", ]
+    return(tNextWords)
+}
+```
+
+## Examine the next word functions
+```{r example.1, echo=TRUE}
+set.seed(16012020)
+###example.1
+library(stringr)
+load("trainNGrams.rda")
+## set vocabulary (with minimum frrequency =9):
+unigramPzero_freq9<- Unigrams(train1grams,minFreq = 9)
+vocab_freq9 <- unigramPzero_freq9$ngramDT$word1 #list of single words
+##vocab size: r`length(vocab_freq9)`
+
+bigramDt_train <- Bigrams(train2grams,minFreq = 2,vocab = vocab_freq9)
+nextWord_how<-bigram_lastWords(bigramDt_train$ngramDT,"how")
+head(nextWord_how)
+
+trigramDt_train <- Trigrams(train3grams,minFreq = 2,vocab = vocab_freq9)
+nextWord_how_are<-trigram_lastWords(trigramDt_train$ngramDT,"how","are")
+nextWord_how_are
+```
+
+**Prediction model based on katz-backoff linear interpolation method**with Good-Turing smoothing algorithm**
+```{r predict algo, echo=TRUE}
+options(mc.cores=1)
+#  bigram.func: 
+## This model predicts the last words(next word given first word) of a bigram. If not found, reports the most frequent unigram.
+## INPUTS:
+## lastWord = the first word of a bigram
+## ugramPzero = datatable of unigrams and zero frequency
+## bgramPzero = datatable of bigrams and zero frequency
+## tgramPzero = datatable of trigrams and zero frequency
+## coef = coefficients of the linear model of uni-, bi-, and tri-grams calculated using simplex method on the development ngrams
+##
+## OUTPUT = prediction, a datatable of bigrams with the known first word and cols(ngram, word1, word2, freq, prob, freqGT, probGT, 
+## ungram, ufreq, uprob, ufreqGT, uprobGT, tprobGT, predictProb)
+##
+## Predicted Word Probability(predictProb) = coef[1]*uprobGT + coef[2]*probGT + coef[3]*tprobGT
+bigram.func <- function(lastWord, coef, ugramPzero, bgramPzero, tgramPzero) {
+    if (!require(data.table)) {
+        stop("Library data.table is missing.")
+    }
+    newWord1 <- lastWord
+    if ("<UNK>" %in% newWord1) return(data.table())
+    ## Get bigrams
+    bNextWords <- bigram_lastWords(bgramPzero$ngramDT, newWord1)
+    if (dim(bNextWords)[1] > 0) {
+        ## Get probabilities of unigrams = nextWord
+        setkey(bNextWords, word2)
+        setkey(ugramPzero$ngramDT, word1)
+        bNextWords <- bNextWords[ugramPzero$ngramDT, nomatch=0L]
+        names(bNextWords) <- gsub("i.", "u", names(bNextWords))
+        ## Add probability of trigram at zero frequency
+        bNextWords[, tprobGT := tgramPzero$pZero]
+        ## Calculate trigram probabilities
+        bNextWords[, predictProb := coef[1]*uprobGT + coef[2]*probGT + coef[3]*tprobGT]
+        ## Sort predicted probabilities in decreasing order
+        setorder(bNextWords, -predictProb)
+        prediction <- bNextWords
+    } 
+    else {
+        ## Get the most frequent word if trigrams and bigrams not found
+        uNextWords <- ugramPzero$ngramDT[order(-probGT)][1]
+        ## Add probabilities of bigrams and trigrams at zero frequency
+        uNextWords[, bprobGT := bgramPzero$pZero]
+        uNextWords[, tprobGT := tgramPzero$pZero]
+        ## Calculate trigram probabilities
+        uNextWords[, predictProb := coef[1]*probGT + coef[2]*bprobGT + coef[3]*tprobGT]
+        prediction <- uNextWords
+    }
+    return(prediction)
+}
+#
+#**predict.func:** 
+## This trigram predictiion model predicts the last words(third word given first two words) of a trigram. If not found, reports the most frequent bigrams of the second word.
+## If not found, reports the most frequent unigrams 
+## INPUTS:
+## lastWords = list of the first two words of a trigram = c(newWord1, newWord2)
+## ugramPzero = datatable of unigrams and zero frequency
+## bgramPzero = datatable of bigrams and zero frequency
+## tgramPzero = datatable of trigrams and zero frequency
+## coef = coefficients of the linear model of uni-, bi-, and tri-grams calculated using simplex method on the development ngrams
+##
+## OUTPUT = prediction, data table of trigrams with the known first word, cols(ngram, word1, word2, word3, freq, prob, freqGT, probGT, bngram, bfreq, bprob, 
+## bfreqGT, bprobGT, ungram, ufreq, uprob, ufreqGT, uprobGT, predictProb)
+## nKeep = number of rows to keep for prediction
+## Predicted Word Probability, predictProb = coef[1]*uprobGT + coef[2]*bprobGT + coef[3]*tprobGT
+## 
+predict.func <- function(lastWords, coef, ugramPzero, bgramPzero, tgramPzero,nKeep) {
+    if (!require(data.table)) {
+        stop("Library data.table is missing.")
+    }
+    newWord1 = lastWords[[1]]
+    newWord2 = lastWords[[2]]
+    if ("<UNK>" %in% newWord2) return(data.table())
+    ## Get trigrams of two new words
+    tNextWords <- trigram_lastWords(tgramPzero$ngramDT, newWord1, newWord2)
+    if (nrow(tNextWords) > 0) {
+        ## Get probabilities of bigrams = newWord2 nextWord
+        setkey(tNextWords, word2, word3)
+        setkey(bgramPzero$ngramDT, word1, word2)
+        tNextWords <- tNextWords[bgramPzero$ngramDT, nomatch=0L]
+        names(tNextWords) <- gsub("i.", "b", names(tNextWords))
+        ## Get probabilities of unigrams = nextWord
+        setkey(tNextWords, word3)
+        setkey(ugramPzero$ngramDT, word1)
+        tNextWords <- tNextWords[ugramPzero$ngramDT, nomatch=0L]
+        names(tNextWords) <- gsub("i.", "u", names(tNextWords))
+        ## Calculate trigram probabilities as the sum of three weighted 
+        ## probabilities: unigram, bigram, and trigram.
+        ## The Jelinek & Mercer method
+        ## see https://english.boisestate.edu/johnfry/files/2013/04/bigram-2x2.pdf
+        ## p'(wi|w_i-2, w_i-1) = c1*p(wi) + c2*p(wi|w_i-1) + c3*p(wi|w_i_2,w_i-1)
+        ## 
+        ## Suggeted coef=c(0.1, 0.3, 0.6)
+        tNextWords[, predictProb := coef[1]*uprobGT + coef[2]*bprobGT + coef[3]*probGT]
+        ## Sort predicted probabilities in decreasing order
+        setorder(tNextWords, -predictProb)
+        prediction <- tNextWords
+    } else 
+        {
+        ## Get bigrams if trigrams not found
+        prediction <- bigram.func(newWord2, coef, ugramPzero, bgramPzero, tgramPzero)
+    }
+    if (nrow(prediction) > nKeep) {
+        prediction<- prediction[1:nKeep, ]# first ten matches
+    }
+    return(prediction)
+}
+## trigramProb: gets the probability of a trigram in the prediction datatable
+## INPUTS:
+## triWords = list of three words in the trigram
+## prediction = data table of prediction from the first two words
+## triPzero = smoothed frequency of an unobserved trigram
+## triProb = probability of the trigram if found, or triPzero
+##
+trigramProb <- function(triWords, prediction, triPzero) {
+    cnames <- colnames(prediction)
+    checkWords <- c("word1", "word2", "word3")
+    if (sum(checkWords %in% cnames) == 3) {
+        prediction <- prediction[word1 == triWords[[1]] & word2 == triWords[[2]] & word3 == triWords[[3]]]
+        triProb <- ifelse(dim(prediction)[1] > 0, prediction[1, "predictProb"], triPzero)
+    } 
+    else {
+        triProb <- triPzero
+    }
+    return(triProb)
+}
+```
+
+**PredictNextWord function takes text/phrase(string) as an input (text variable) to predict the next word**
+```{r Predict, echo=TRUE, message=FALSE, warning=FALSE}
+library(textclean)
+## predict_Nxtword: get the next words for the input string from Model
+## Required libraries: tm, data.table, stringr
+## Required functions: preprocessData, readTextFile
+## input: the string
+## nextWords: output, up to three words predicted
+predict_Nxtword <- function(input) {
+    simpleCorp<- function(x){
+    corp<- SimpleCorpus(VectorSource(x))
+    corp<-tolower(corp)
+    Str<- unlist(corp)[[1]]
+    return(Str)
+    }
+    ## Check for an empty string
+    if (input== "") {
+        return("<UNK>")
+    }
+    ## Clean text string
+    Str<-simpleCorp(input)
+    ## Convert corpus to a string
+    Str <-concatenate(as.character(unlist(Str)))
+    if (Str == " ") {
+        return("<UNK>")
+    }
+    Str<-removeNumbers(Str)
+    ## Split the clean string into words
+    inputWords <- str_split(Str, boundary("word"))[[1]]
+    if (length(inputWords) > 1) {
+        testWords <- tail(inputWords, 2)
+    } else if (length(inputWords) > 0) {
+        testWords <- c("<UNK>", tail(inputWords, 1))
+    } else {
+        return("<UNK>")
+    }
+    coef<-c(0.1,0.3,0.6)# from simplex method
+    predictions <- predict.func(testWords,coef,ugramPzero,bgramPzero,tgramPzero,3)
+    cnames <- colnames(predictions)
+    if ("word3" %in% cnames) {
+        nextWords <- predictions$word3
+    } else if ("word2" %in% cnames) {
+        nextWords <- predictions$word2
+    } else {
+        nextWords <- predictions$word1
+    }
+    return(nextWords)
+}
+```
+
+__Explore the model with example variables__
+```{r example.2}
+set.seed(16012020)
+###example.2
+coef1 <-c(0.1,0.3,0.6)
+ugramPzero.f9 <-Unigrams(train1grams,minFreq = 9)
+vocab_f9 <- ugramPzero.f9$ngramDT$word1
+bgramPzero.f92 <-Bigrams(train2grams,minFreq = 2,vocab_f9)
+tgramPzero.f922<- Trigrams(train3grams,minFreq = 2,vocab_f9)
+pred1 <-bigram.func(lastWord ="how",coef = coef1,ugramPzero.f9, bgramPzero.f92, tgramPzero.f922)
+head(pred1,5)
+##
+pred2 <-predict.func(c("how","are"),coef =coef1,ugramPzero.f9,bgramPzero.f92,tgramPzero.f922,nKeep = 5)
+head(pred2)
+##Example: Probability of a trigram ("how","are","you")
+trigramProb(c("how","are","you"),prediction = pred2,triPzero = tgramPzero.f922$pZero)
+```
+
+__Quiz__
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+q1 <- "When you breathe, I want to be the air for you. I'll be there for you, I'd live and I'd"
+q2 <- "Guy at my table's wife got up to go to the bathroom and I asked about dessert and he started telling me about his"
+q3 <-"I'd give anything to see arctic monkeys this"
+q4 <-"Talking to your mom has the same effect as a hug and helps reduce your"
+q5<- "When you were in Holland you were like 1 inch away from me but you hadn't time to take a"
+q6<-"I'd just like all of these questions answered, a presentation of evidence, and a jury to settle the"
+q7 <-"I can't deal with unsymetrical things. I can't even hold an uneven number of bags of groceries in each"
+q8<- "Every inch of you is perfect from the bottom to the"
+q9 <-"I’m thankful my childhood was filled with imagination and bruises from playing"
+q10 <-"I like how the same people are in almost all of Adam Sandler's"
+ques<- c(q1,q2,q3,q4,q5,q6,q7,q8,q9,q10)
+correctAns <- list("die", "marital", "weekend", "stress", "picture","matter", "hand", "top", "outside", "movies")
+```
+
+**APPENDIX.1**
+##Calculating the perplexity model
+```{r Perplexity, echo=TRUE, fig.pos="h", message=FALSE, warning=FALSE}
+library(knitr)
+knitr::include_graphics(path="/Users/rizwanmohamed/Coursera/perplexity.png")
+##perplexity:
+## INPUT = predictProbs, a set of predicted probabilities.
+## OUTPUT = perplexity
+perplexity<- function(predictProbs) {
+    totalLogProb <- sum(log(predictProbs))
+    Perplexity <- 2^((-1/length(predictProbs)) * totalLogProb)
+    return(Perplexity)
+}
+##
+##**The lower is the perplexity of the model, the better is the model training.**
+##from example 2
+testwords<-"I can't deal with unsymetrical things. I can't even hold an uneven number of bags of groceries in each"
+coef1 <-c(0.1,0.3,0.6)
+ugramPzero.f9 <-Unigrams(train1grams,minFreq = 9)
+vocab_f9 <- ugramPzero.f9$ngramDT$word1
+bgramPzero.f92 <-Bigrams(train2grams,minFreq = 2,vocab_f9)
+tgramPzero.f922<- Trigrams(train3grams,minFreq = 2,vocab_f9)
+test_lastword<-"in"
+pred3 <-bigram.func(lastWord = test_lastword,coef = coef1,ugramPzero.f9,bgramPzero.f92,tgramPzero.f922)
+predProbs3<-pred3$predictProb
+PPb<-perplexity(predictProbs = predProbs3)
+print(PPb)
+##perplexity of the model in this example
+pred4 <-predict.func(c("groceries","in"),coef = coef1,ugramPzero.f9,bgramPzero.f92,tgramPzero.f922,20)
+predProbs4<-pred4$predictProb
+PPt<-perplexity(predictProbs = predProbs4)
+print(PPt)
+##> It's clear from PPt<<PPb, trigram model is more efficient than bigram.
+##> similarly, Fivegrams is better than Fourgram and so on.
+prediction_model <- function(input) {
+    simpleCorp<- function(x){
+    corp<- SimpleCorpus(VectorSource(x))
+    corp<-tolower(corp)
+    Str<- unlist(corp)[[1]]
+    return(Str)
+    }
+    ## Check for an empty string
+    if (input== "") {
+        return("<UNK>")
+    }
+    ## Clean text string
+    Str<-simpleCorp(input)
+    ## Convert corpus to a string
+    Str <-concatenate(as.character(unlist(Str)))
+    if (Str == " ") {
+        return("<UNK>")
+    }
+    Str<-removeNumbers(Str)
+    ## Split the clean string into words
+    inputWords <- str_split(Str, boundary("word"))[[1]]
+    if (length(inputWords) > 1) {
+        testWords <- tail(inputWords, 2)
+    } else if (length(inputWords) > 0) {
+        testWords <- c("<UNK>", tail(inputWords, 1))
+    } else {
+        return("<UNK>")
+    }
+    coef<-c(0.1,0.3,0.6)# from simplex method
+    predictions <- predict.func(testWords,coef,ugramPzero.f9,bgramPzero.f92,tgramPzero.f922,10)
+    cnames <- colnames(predictions)
+    if ("word3" %in% cnames) {
+        nextWords <- predictions$word3
+    } else if ("word2" %in% cnames) {
+        nextWords <- predictions$word2
+    } else {
+        nextWords <- predictions$word1
+    }
+    return(nextWords)
+}
+### predicted last words
+pred5<-prediction_model("I can't deal with unsymetrical things. I can't even hold an uneven number of bags of groceries in each")
+pred5
+correctAnswer<-"hand"
+```
+
+**APPENDIX.2**
+## Validating the models 
+```{r Validation function, echo=TRUE, message=FALSE, warning=FALSE}
+library(data.table);library(tm)
+## isNthMatch: checks if the testWord3 matches the n-th predictions
+## n = input, the n-th row to match
+## input= tetsWord3, the test word
+## predictions = input, a data table of predictions of the testWord3
+## isMatched = output, TRUE if matched, FALSE if not.
+##
+isNthMatch <- function(n, testWord, predictions) {
+    cnames <- colnames(predictions)
+    isMatched <- FALSE
+    if (nrow(predictions) >= n) {
+        if ("word3" %in% cnames) {
+            isMatched <- testWord == predictions[[n, "word3"]]
+        } else if ("word2" %in% cnames) {
+            isMatched <- testWord == predictions[[n, "word2"]]
+        } else {
+            isMatched <- testWord == predictions[[n, "word1"]]
+        }
+    }
+    return(isMatched)
+}
+#  validateModel: 
+## validates or tests a model by getting predictions of the third word of a set of trigrams and 
+## calculating the perplexity and accuracies of the first, second, and third matches.
+## INPUTS:
+## testWordsDT = datatable of three words (word1, word2, word3)
+## ugramPzero = datatable of unigrams and zero frequency
+## bgramPzero = datatable of bigrams and zero frequency
+## tgramPzero = datatable of trigrams and zero frequency
+## coef = coefficients of the linear model of uni-, bi-, and tri-grams 
+## nKeep = number of rows to keep in the prediction datatable
+## blockSize = block size for block processin, not used.
+## OUTPUT = summary, a datatable of perplexity, fractions of first, second and third matches
+## 
+validateModel <- function(testWordsDT, coef, ugramPzero, bgramPzero, tgramPzero, nKeep,blockSize) {
+    ## Get the probability, first, second and third matches (T,F) for each row
+    totaltestWords<- nrow(testWordsDT)
+    fmodel <- function(testWordsDT) {# is datatable of word1 word2 word3 of development set
+        predictions <-predict.func(testWordsDT[, 1:2], coef, ugramPzero, bgramPzero, tgramPzero,
+                                nKeep)
+        triProb <- trigramProb(testWordsDT, predictions, tgramPzero$pZero)
+        firstMatch <- isNthMatch(1,testWordsDT[[1,3]], predictions)
+        secondMatch <- isNthMatch(2,testWordsDT[[1,3]], predictions)
+        thirdMatch <- isNthMatch(3,estWordsDT[[1,3]], predictions)
+        return(c(triProb[[1]], firstMatch[[1]], secondMatch[[1]], thirdMatch[[1]]))
+    }
+    predictAll <-testWordsDT[,fmodel(.SD), by=1:nrow(testWordsDT)]##Run fmodel by rows
+    ##Reshape to form 4 by dataLength matrix
+    predictAll <- matrix(predictAll$V1, nrow =4, byrow=FALSE)
+    rownames(predictAll) <- c("perplexity","firstMatch","secondMatch", "thirdMatch")
+    ##Perplexity
+    testPerplexity <- perplexity(predictAll["perplexity"],)
+    ##Accuracies
+    firstAccuracy <- sum(predictAll["firstMatch", ]) / totaltestWords
+    secondAccuracy <- sum(predictAll["secondMatch", ]) / totaltestWords
+    thirdAccuracy <- sum(predictAll["thirdMatch", ]) / totaltestWords
+    ##Summary table
+    summary <- c(testPerplexity, firstAccuracy, secondAccuracy, thirdAccuracy)
+    return(summary)
+    }
+```
+
+**Conclusion:**
+
+1. Model selected is set2 with with coef =c(0.1,0.3,0.6) with vocabulary size 10850 words has optimal first accuaracy and lowest perplexity compared to other models.
+
+2. As the computing the models in R is very expensive and accuracy is under 10% for NLP, I'd recommend to use Neural networks with LSTM to perform NLP projects with accuracy up to 98%
+
+3. This project is very good learning exercise, however it consumes lot of times to rrain the models and validate on development and test sets. 
+
+4. The improper contractions, abbreviations, and shorthands whose presences reduce the significance of valid n-grams.The generated bigrams and trigrams in this project might have incoherent combinations because the sentences in the dataset did not have start and end markers. Adding these markers would produce meaningful n-grams and improve the word context in prediction.
+
+5. The probability of the next word depends on its history or the previous words. The trigram model in this project relies on the previous two words for prediction. 
+
+6. Using a 4-gram model is equivalent to reaching further into the next word’s history. One concern is the 4-gram model needs more training data and additional care about word context (see Jurafsky & Martin, Chapter 4, p. 6), so implementing a 4-gram model should go along with the above first and fourth items.
+
+7. Shinyapp of this project is publised on the shinyapp.io (link is in RPubs)
