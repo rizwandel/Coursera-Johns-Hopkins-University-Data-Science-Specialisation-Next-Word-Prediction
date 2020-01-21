@@ -9,3 +9,9 @@ The project is to build the model to predict the next word of a word or a word s
 5. The model is created with the linear interpolation of unigram, bigram, and trigram probabilities to estimate the probability of the next word’s trigram.
 6. The optimal weights of these probabilities resulted from a search using the simplex method to maximize the accuracy of the first next word predicted.
 7. The model with stopwords predicted the first next word with about 9% accuracy.
+
+
+> find the compiled code in Rpubs:http://rpubs.com/rizwanm789/NextWordPrediction
+
+
+
