@@ -11,7 +11,9 @@ The project is to build the model to predict the next word of a word or a word s
 7. The model with stopwords predicted the first next word with about 9% accuracy.
 
 
-> find the compiled code in Rpubs:http://rpubs.com/rizwanm789/NextWordPrediction
+> find the presentation in Rpubs:http://rpubs.com/rizwanm789/nextwordpredictor
+
+> find shinyapp at https://rizwandatascientist.shinyapps.io/NextWordPrediction/
 
 
 
